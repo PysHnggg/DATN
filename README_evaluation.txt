@@ -21,10 +21,10 @@ Typical workflow
    outputs/pose/pose_log.csv
 
 2) Evaluate metrics:
-   python evaluate_pose_metrics.py --input outputs/pose/pose_log.csv --outdir outputs/eval --marker-size-cm 4.0
+   python3 evaluate_pose_metrics.py --input outputs/pose/pose_log.csv --outdir outputs/eval --marker-size-cm 4.0
 
 3) Generate figures:
-   python plot_paper_figures.py --input outputs/eval/clean_pose_metrics.csv --outdir outputs/eval/figures
+   python3 plot_paper_figures.py --input outputs/eval/clean_pose_metrics.csv --outdir outputs/eval/figures
 
 Recommended columns in pose_log.csv
 -----------------------------------

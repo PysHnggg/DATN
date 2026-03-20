@@ -48,7 +48,8 @@ DISTANCE_LABELS = ["0-0.3", "0.3-0.5", "0.5-0.7", "0.7-1.0", "1.0-1.5", "1.5-2.5
 
 
 def rotation_error_deg_from_row(row: pd.Series) -> float:
-    """Geodesic distance on SO(3). Only valid when marker_on_object."""
+    """Geodesic distance on SO(3). Only valid when marker_on_object.
+    When output uses ArUco (marker on object), rot_err_deg = PCA vs GT (algorithm quality)."""
     if "marker_on_object" in row.index:
         mo = row["marker_on_object"]
         if mo is False or str(mo).lower() in ("false", "0", ""):

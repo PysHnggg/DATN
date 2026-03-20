@@ -9,7 +9,9 @@ Frame conventions (OpenCV/RealSense camera):
 
 Rotation error: geodesic distance on SO(3), angle = arccos((trace(R_gt @ R_est.T) - 1) / 2)
 """
+import argparse
 import os
+import sys
 import csv
 import time
 import math
@@ -26,6 +28,9 @@ from realsense_depth import RealSenseDepth
 import dashboard
 
 OUTDIR = "outputs"
+# Jetson/headless: set offscreen only when not using --display
+if not os.environ.get("DISPLAY") and "--display" not in sys.argv and "-d" not in sys.argv:
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
 HEADLESS = not os.environ.get("DISPLAY")
 os.makedirs(f"{OUTDIR}/frames", exist_ok=True)
 os.makedirs(f"{OUTDIR}/depth", exist_ok=True)
@@ -823,6 +828,14 @@ def render_pointcloud(depth_m, intr, detected_objs=None, canvas_h=480, canvas_w=
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="YOLO-3D Pose Estimation")
+    parser.add_argument("--display", "-d", action="store_true",
+                        help="Show OpenCV windows (like Windows). Use with monitor or ssh -X.")
+    args = parser.parse_args()
+    use_display = args.display or bool(os.environ.get("DISPLAY"))
+    if args.display and not os.environ.get("DISPLAY"):
+        print("Note: --display requires DISPLAY. Use: ssh -X, or connect a monitor.")
+
     yolo_model_size, device = "nano", "cuda"
     conf_threshold, iou_threshold = 0.25, 0.45
     rs_w, rs_h, rs_fps = 640, 480, 15
@@ -873,7 +886,7 @@ def main():
     start_time = time.time()
     fps_display = "FPS: --"
 
-    if HEADLESS:
+    if not use_display:
         print("Running headless (no display). Use dashboard at http://0.0.0.0:5000 | Ctrl+C to quit.")
     else:
         print("Running: Pose + ArUco. Press P to save, Q/ESC to quit.")
@@ -993,9 +1006,12 @@ def main():
                     tvec = m["tvec"].reshape(3)
                     R_gt = m["R"]
                     pos_err, err_normal, err_tangent = translation_surface_err(tvec, obb_center, R_est, extents)
-                    ang_err = rotation_error_deg(R_gt, R_est) if marker_on_object else float("nan")
                     algorithm_ang_err = rotation_error_deg(R_gt, R_pca) if marker_on_object else float("nan")
-                    normal_err = surface_normal_error_deg(R_gt, R_est) if marker_on_object else float("nan")
+                    # When marker_on_object we use ArUco for output; rot_err_deg should reflect PCA quality (not ArUco vs itself)
+                    ang_err = algorithm_ang_err if (marker_on_object and USE_MARKER_POSE_WHEN_ON_OBJECT) else (
+                        rotation_error_deg(R_gt, R_est) if marker_on_object else float("nan")
+                    )
+                    normal_err = surface_normal_error_deg(R_gt, R_pca) if marker_on_object else float("nan")
                     gt_roll, gt_pitch, gt_yaw = rotmat_to_rpy_zyx(R_gt)
                     gt_row = {
                         "gt_marker_id": int(m["id"]),
@@ -1108,7 +1124,7 @@ def main():
             depth_vis = np.clip(np.nan_to_num(depth_m, nan=0.0) / 2.0 * 255.0, 0, 255).astype(np.uint8)
             depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
 
-            if not HEADLESS:
+            if use_display:
                 cv2.imshow("Pose + ArUco", vis)
                 cv2.imshow("Point Cloud", pc_view)
                 cv2.imshow("Depth", depth_color)
@@ -1121,7 +1137,7 @@ def main():
                 _fps_val = 0.0
             dashboard.push_detections(rows_to_save, _fps_val, frame_id)
 
-            if HEADLESS:
+            if not use_display:
                 time.sleep(0.01)
             else:
                 key = cv2.waitKey(1) & 0xFF
@@ -1149,7 +1165,7 @@ def main():
                 f.write(f"{fps_val:.2f}\n")
         except Exception:
             pass
-        if not HEADLESS:
+        if use_display:
             cv2.destroyAllWindows()
 
 
