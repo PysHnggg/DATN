@@ -13,7 +13,6 @@ Exposes:
 import json
 import threading
 import time
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -79,7 +78,7 @@ def set_isaac_connected(ok: bool):
 
 # ── Internal helpers ──────────────────────────────────────────────────────
 
-_NO_SIGNAL: Optional[np.ndarray] = None
+_NO_SIGNAL: np.ndarray | None = None
 
 
 def _no_signal():
@@ -92,7 +91,7 @@ def _no_signal():
     return _NO_SIGNAL
 
 
-def _encode(frame: Optional[np.ndarray], quality: int = 72) -> bytes:
+def _encode(frame: np.ndarray | None, quality: int = 72) -> bytes:
     if frame is None:
         frame = _no_signal()
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])

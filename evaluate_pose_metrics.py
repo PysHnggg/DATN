@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List
 
 import numpy as np
 import pandas as pd
@@ -63,7 +63,7 @@ def rotation_error_deg_from_row(row: pd.Series) -> float:
     return math.degrees(math.acos(val))
 
 
-def ensure_metrics(df: pd.DataFrame, marker_size_cm: Optional[float] = None) -> pd.DataFrame:
+def ensure_metrics(df: pd.DataFrame, marker_size_cm: float | None = None) -> pd.DataFrame:
     df = df.copy()
 
     for c in NUMERIC_CANDIDATES:
@@ -233,14 +233,14 @@ def main() -> None:
 
     show_metrics = [
         m for m in [
-            "trans_err_cm", 
+            # "trans_err_cm", 
             "trans_err_normal_cm", 
-            "trans_err_tangent_cm",
+            # "trans_err_tangent_cm",
             "rot_err_deg", "normal_err_deg", "algorithm_rot_err_deg", "algorithm_rot_err_deg",
-            "marker_measured_mean_edge_cm", "marker_size_err_cm",
-            "num_points", "valid_depth_ratio",
-            "linearity", "planarity", "scattering",
-            "length_m", "width_m", "height_m",
+            # "marker_measured_mean_edge_cm", "marker_size_err_cm",
+            # "num_points", "valid_depth_ratio",
+            # "linearity", "planarity", "scattering",
+            # "length_m", "width_m", "height_m",
         ] if m in df.columns
     ]
     for m in show_metrics:

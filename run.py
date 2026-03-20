@@ -14,8 +14,6 @@ import csv
 import time
 import math
 import itertools
-from typing import Optional
-
 import cv2
 import json
 import socket
@@ -26,7 +24,6 @@ from realsense_depth import RealSenseDepth
 import dashboard
 
 OUTDIR = "outputs"
-HEADLESS = not os.environ.get("DISPLAY")
 os.makedirs(f"{OUTDIR}/frames", exist_ok=True)
 os.makedirs(f"{OUTDIR}/depth", exist_ok=True)
 os.makedirs(f"{OUTDIR}/clouds", exist_ok=True)
@@ -307,7 +304,7 @@ def rotation_geodesic_deg(Ra: np.ndarray, Rb: np.ndarray) -> float:
     return math.degrees(math.acos(float(np.clip(val, -1.0, 1.0))))
 
 
-def align_rotation_to_reference(R_raw: np.ndarray, R_ref: Optional[np.ndarray]):
+def align_rotation_to_reference(R_raw: np.ndarray, R_ref: np.ndarray | None):
     R_raw = orthonormalize_rotation(R_raw)
     if R_ref is None:
         return R_raw, False, None
@@ -851,16 +848,6 @@ def main():
     init_pose_csv()
     dashboard.start(host="0.0.0.0", port=5000)
 
-    # Jetson/ARM: first YOLO model can return empty; warmup with structured image fixes it
-    import platform
-    if platform.machine() in ("aarch64", "armv7l"):
-        from ultralytics import YOLO
-        _warmup_img = np.ones((rs_h, rs_w, 3), dtype=np.uint8) * 60
-        _warmup_img[rs_h//4:3*rs_h//4, rs_w//4:3*rs_w//4] = 180
-        _warmup = YOLO("yolo11n.pt")
-        _ = _warmup.predict(_warmup_img, verbose=False, device=device)
-        del _warmup, _warmup_img
-
     detector = ObjectDetector(model_size=yolo_model_size, conf_thres=conf_threshold, iou_thres=iou_threshold, device=device)
     rs_cam = RealSenseDepth(w=rs_w, h=rs_h, fps=rs_fps)
     intr = rs_cam.intr
@@ -873,10 +860,7 @@ def main():
     start_time = time.time()
     fps_display = "FPS: --"
 
-    if HEADLESS:
-        print("Running headless (no display). Use dashboard at http://0.0.0.0:5000 | Ctrl+C to quit.")
-    else:
-        print("Running: Pose + ArUco. Press P to save, Q/ESC to quit.")
+    print("Running: Pose + ArUco. Press P to save, Q/ESC to quit.")
 
     try:
         while True:
@@ -884,20 +868,20 @@ def main():
             if color is None or depth_m is None:
                 continue
 
+            vis = color.copy()
             gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
 
             markers = detect_aruco_pose(gray, aruco_detector, K, dist, marker_length_m=marker_length_m, edge_margin_px=12)
             for m in markers:
                 m["measured"] = measure_marker_from_depth(depth_m, intr, m, z_min=z_min, z_max=z_max)
 
+            draw_aruco_markers(vis, markers, K, dist, marker_axis_len_m=marker_axis_len_m, draw_axis=True, axis_exclude_ids=cube_marker_ids)
+
             try:
-                vis, detections = detector.detect(color.copy(), track=True)
+                _, detections = detector.detect(color.copy(), track=True)
             except Exception as e:
                 print("Detection error:", e)
-                vis = color.copy()
                 detections = []
-
-            draw_aruco_markers(vis, markers, K, dist, marker_axis_len_m=marker_axis_len_m, draw_axis=True, axis_exclude_ids=cube_marker_ids)
 
             gt_only_markers = [m for m in markers if int(m["id"]) not in cube_marker_ids]
             if gt_only_markers:
@@ -1102,16 +1086,14 @@ def main():
                 fps_display = f"FPS: {frame_count / max(1e-6, time.time() - start_time):.1f}"
 
             cv2.putText(vis, fps_display, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.imshow("Pose + ArUco", vis)
 
             pc_view = render_pointcloud(depth_m, intr, detected_objs=pc_objs, z_min=z_min, z_max=z_max)
+            cv2.imshow("Point Cloud", pc_view)
 
             depth_vis = np.clip(np.nan_to_num(depth_m, nan=0.0) / 2.0 * 255.0, 0, 255).astype(np.uint8)
             depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
-
-            if not HEADLESS:
-                cv2.imshow("Pose + ArUco", vis)
-                cv2.imshow("Point Cloud", pc_view)
-                cv2.imshow("Depth", depth_color)
+            cv2.imshow("Depth", depth_color)
 
             dashboard.push_frame("vis", vis)
             dashboard.push_frame("depth", depth_color)
@@ -1121,21 +1103,18 @@ def main():
                 _fps_val = 0.0
             dashboard.push_detections(rows_to_save, _fps_val, frame_id)
 
-            if HEADLESS:
-                time.sleep(0.01)
-            else:
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('p'):
-                    save_frame_bundle(frame_id, color, vis, depth_m, depth_color_bgr=depth_color, pc_view_bgr=pc_view)
-                    if saved_pts is not None:
-                        save_ply_xyz(saved_pts, f"{OUTDIR}/clouds/{frame_id:06d}_roi_cloud.ply")
-                        np.save(f"{OUTDIR}/clouds/{frame_id:06d}_roi_cloud.npy", saved_pts)
-                        save_pca_axes_ply(saved_pts, saved_center, saved_R, axis_len=0.06, path=f"{OUTDIR}/clouds/{frame_id:06d}_roi_pca.ply")
-                    for row in rows_to_save:
-                        append_pose_row(row)
-                    print(f"[Saved] {len(rows_to_save)} pose rows")
-                elif key == ord('q') or key == 27:
-                    break
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('p'):
+                save_frame_bundle(frame_id, color, vis, depth_m, depth_color_bgr=depth_color, pc_view_bgr=pc_view)
+                if saved_pts is not None:
+                    save_ply_xyz(saved_pts, f"{OUTDIR}/clouds/{frame_id:06d}_roi_cloud.ply")
+                    np.save(f"{OUTDIR}/clouds/{frame_id:06d}_roi_cloud.npy", saved_pts)
+                    save_pca_axes_ply(saved_pts, saved_center, saved_R, axis_len=0.06, path=f"{OUTDIR}/clouds/{frame_id:06d}_roi_pca.ply")
+                for row in rows_to_save:
+                    append_pose_row(row)
+                print(f"[Saved] {len(rows_to_save)} pose rows")
+            elif key == ord('q') or key == 27:
+                break
     finally:
         try:
             rs_cam.stop()
@@ -1149,8 +1128,7 @@ def main():
                 f.write(f"{fps_val:.2f}\n")
         except Exception:
             pass
-        if not HEADLESS:
-            cv2.destroyAllWindows()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

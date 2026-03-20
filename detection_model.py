@@ -82,83 +82,152 @@ class ObjectDetector:
                 - detections (list): List of detections [bbox, score, class_id, object_id]
         """
         detections = []
+        
+        # Make a copy of the image for annotation
         annotated_image = image.copy()
         
         try:
             if track:
+                # Run inference with tracking
                 results = self.model.track(image, verbose=False, device=self.device, persist=True)
             else:
+                # Run inference without tracking
                 results = self.model.predict(image, verbose=False, device=self.device)
         except RuntimeError as e:
-            err_str = str(e)
-            if self.device == 'mps' and "not currently implemented for the MPS device" in err_str:
+            # Handle potential MPS errors
+            if self.device == 'mps' and "not currently implemented for the MPS device" in str(e):
                 print(f"MPS error during detection: {e}")
                 print("Falling back to CPU for this frame")
-                results = self.model.track(image, verbose=False, device='cpu', persist=True) if track else self.model.predict(image, verbose=False, device='cpu')
-            elif self.device == 'cuda' and ("out of memory" in err_str.lower() or "CUDA" in err_str):
-                print(f"CUDA OOM during detection: {e}")
-                print("Falling back to CPU for this frame")
-                results = self.model.track(image, verbose=False, device='cpu', persist=True) if track else self.model.predict(image, verbose=False, device='cpu')
+                if track:
+                    results = self.model.track(image, verbose=False, device='cpu', persist=True)
+                else:
+                    results = self.model.predict(image, verbose=False, device='cpu')
             else:
+                # Re-raise the error if not MPS or not an implementation error
                 raise
         
-        if not results or results[0] is None:
-            return annotated_image, detections
+        if track:
+            # Clean up trajectories for objects that are no longer tracked
+            for id_ in list(self.tracking_trajectories.keys()):
+                if id_ not in [int(bbox.id) for predictions in results if predictions is not None 
+                              for bbox in predictions.boxes if bbox.id is not None]:
+                    del self.tracking_trajectories[id_]
+            
+            # Process results
+            for predictions in results:
+                if predictions is None:
+                    continue
+                
+                if predictions.boxes is None:
+                    continue
+                
+                # Process boxes
+                for bbox in predictions.boxes:
+                    # Extract information
+                    scores = bbox.conf
+                    classes = bbox.cls
+                    bbox_coords = bbox.xyxy
+                    
+                    # Check if tracking IDs are available
+                    if hasattr(bbox, 'id') and bbox.id is not None:
+                        ids = bbox.id
+                    else:
+                        ids = [None] * len(scores)
+                    
+                    # Process each detection
+                    for score, class_id, bbox_coord, id_ in zip(scores, classes, bbox_coords, ids):
+                        xmin, ymin, xmax, ymax = bbox_coord.cpu().numpy()
+                        
+                        # Add to detections list
+                        detections.append([
+                            [xmin, ymin, xmax, ymax],  # bbox
+                            float(score),              # confidence score
+                            int(class_id),             # class id
+                            int(id_) if id_ is not None else None  # object id
+                        ])
+                        
+                        # Draw bounding box
+                        cv2.rectangle(annotated_image, 
+                                     (int(xmin), int(ymin)), 
+                                     (int(xmax), int(ymax)), 
+                                     (0, 0, 225), 2)
+                        
+                        # Add label
+                        label = f"ID: {int(id_) if id_ is not None else 'N/A'} {predictions.names[int(class_id)]} {float(score):.2f}"
+                        text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        dim, baseline = text_size[0], text_size[1]
+                        cv2.rectangle(annotated_image, 
+                                     (int(xmin), int(ymin)), 
+                                     (int(xmin) + dim[0], int(ymin) - dim[1] - baseline), 
+                                     (30, 30, 30), cv2.FILLED)
+                        cv2.putText(annotated_image, label, 
+                                   (int(xmin), int(ymin) - 7), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        
+                        # Update tracking trajectories
+                        if id_ is not None:
+                            centroid_x = (xmin + xmax) / 2
+                            centroid_y = (ymin + ymax) / 2
+                            
+                            if int(id_) not in self.tracking_trajectories:
+                                self.tracking_trajectories[int(id_)] = deque(maxlen=10)
+                            
+                            self.tracking_trajectories[int(id_)].append((centroid_x, centroid_y))
+            
+            # Draw trajectories
+            for id_, trajectory in self.tracking_trajectories.items():
+                for i in range(1, len(trajectory)):
+                    thickness = int(2 * (i / len(trajectory)) + 1)
+                    cv2.line(annotated_image, 
+                            (int(trajectory[i-1][0]), int(trajectory[i-1][1])), 
+                            (int(trajectory[i][0]), int(trajectory[i][1])), 
+                            (255, 255, 255), thickness)
         
-        result = results[0]
-        n_boxes = len(result.boxes) if result.boxes is not None else 0
-        
-        # Use Ultralytics built-in plot() for reliable bbox drawing (works on Jetson/Windows)
-        try:
-            annotated_image = result.plot()
-        except Exception as e:
-            print(f"[Detection] plot() failed: {e}")
-            annotated_image = image.copy()
-        
-        if result.boxes is None or n_boxes == 0:
-            return annotated_image, detections
-        
-        # Parse boxes using direct tensor access (avoids iteration bugs on Jetson)
-        xyxy = result.boxes.xyxy.cpu().numpy()
-        conf = result.boxes.conf.cpu().numpy()
-        cls = result.boxes.cls.cpu().numpy()
-        ids_t = result.boxes.id
-        if ids_t is not None:
-            ids_np = ids_t.cpu().numpy()
         else:
-            ids_np = np.full(len(xyxy), np.nan)
-        
-        names = result.names if hasattr(result, 'names') else self.model.names
-        
-        for i in range(len(xyxy)):
-            x1, y1, x2, y2 = xyxy[i]
-            score = float(conf[i]) if conf.size > 0 else 0.0
-            class_id = int(cls[i]) if cls.size > 0 else 0
-            tid = int(ids_np[i]) if ids_np.size > 0 and not np.isnan(ids_np[i]) else None
-            
-            detections.append([[float(x1), float(y1), float(x2), float(y2)], score, class_id, tid])
-            
-            if track and tid is not None:
-                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                if tid not in self.tracking_trajectories:
-                    self.tracking_trajectories[tid] = deque(maxlen=10)
-                self.tracking_trajectories[tid].append((cx, cy))
-        
-        # Clean up stale trajectories
-        if track and ids_np.size > 0:
-            active_ids = set(int(x) for x in ids_np if not np.isnan(x))
-            for tid in list(self.tracking_trajectories.keys()):
-                if tid not in active_ids:
-                    del self.tracking_trajectories[tid]
-        
-        # Draw trajectories on top
-        for tid, trajectory in self.tracking_trajectories.items():
-            for j in range(1, len(trajectory)):
-                t = int(2 * (j / len(trajectory)) + 1)
-                cv2.line(annotated_image,
-                         (int(trajectory[j-1][0]), int(trajectory[j-1][1])),
-                         (int(trajectory[j][0]), int(trajectory[j][1])),
-                         (255, 255, 255), t)
+            # Process results for non-tracking mode
+            for predictions in results:
+                if predictions is None:
+                    continue
+                
+                if predictions.boxes is None:
+                    continue
+                
+                # Process boxes
+                for bbox in predictions.boxes:
+                    # Extract information
+                    scores = bbox.conf
+                    classes = bbox.cls
+                    bbox_coords = bbox.xyxy
+                    
+                    # Process each detection
+                    for score, class_id, bbox_coord in zip(scores, classes, bbox_coords):
+                        xmin, ymin, xmax, ymax = bbox_coord.cpu().numpy()
+                        
+                        # Add to detections list
+                        detections.append([
+                            [xmin, ymin, xmax, ymax],  # bbox
+                            float(score),              # confidence score
+                            int(class_id),             # class id
+                            None                       # object id (None for no tracking)
+                        ])
+                        
+                        # Draw bounding box
+                        cv2.rectangle(annotated_image, 
+                                     (int(xmin), int(ymin)), 
+                                     (int(xmax), int(ymax)), 
+                                     (0, 0, 225), 2)
+                        
+                        # Add label
+                        label = f"{predictions.names[int(class_id)]} {float(score):.2f}"
+                        text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        dim, baseline = text_size[0], text_size[1]
+                        cv2.rectangle(annotated_image, 
+                                     (int(xmin), int(ymin)), 
+                                     (int(xmin) + dim[0], int(ymin) - dim[1] - baseline), 
+                                     (30, 30, 30), cv2.FILLED)
+                        cv2.putText(annotated_image, label, 
+                                   (int(xmin), int(ymin) - 7), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         return annotated_image, detections
     
