@@ -13,6 +13,8 @@ PCA for orientation
 
 ArUco markers for ground truth
 
+**Evaluation (scientific):** When USE_MARKER_POSE_WHEN_ON_OBJECT=True, marker pose is used for DISPLAY only. The CSV always logs the algorithm pose (PCA) so rot_err_deg and trans_err reflect true algorithm performance vs GT.
+
 The system estimates:
 
 3D position (translation)

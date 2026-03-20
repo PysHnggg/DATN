@@ -236,7 +236,7 @@ def main() -> None:
             # "trans_err_cm", 
             "trans_err_normal_cm", 
             # "trans_err_tangent_cm",
-            "rot_err_deg", "normal_err_deg", "algorithm_rot_err_deg", "algorithm_rot_err_deg",
+            "rot_err_deg", "normal_err_deg", "algorithm_rot_err_deg",
             # "marker_measured_mean_edge_cm", "marker_size_err_cm",
             # "num_points", "valid_depth_ratio",
             # "linearity", "planarity", "scattering",

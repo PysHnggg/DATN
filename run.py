@@ -36,7 +36,8 @@ RPY_ROLL_NEGATE = False
 # Use RANSAC plane fitting for PCA (target: rot_err < 0.035 rad)
 PCA_USE_RANSAC = True
 
-# When marker is on object: use marker pose (R, t) - ArUco chính xác hơn PCA
+# When marker is on object: use marker pose for DISPLAY only. For evaluation we always log
+# algorithm pose (PCA) to get scientifically valid rot_err_deg and trans_err.
 USE_MARKER_POSE_WHEN_ON_OBJECT = True
 
 POSE_CSV_HEADER = [
@@ -939,7 +940,7 @@ def main():
 
                 try:
                     pca_fn = pca_orientation_ransac if PCA_USE_RANSAC else pca_orientation
-                    center_est, R_est_raw, eigvals = pca_fn(pts)
+                    center_pca, R_est_raw, eigvals = pca_fn(pts)
                     m = match_marker_to_bbox(markers, bbox)
                     x1, y1, x2, y2 = map(int, bbox)
                     marker_on_object = False
@@ -951,18 +952,25 @@ def main():
                     prev_R = pose_state[pose_key]["R"] if pose_key in pose_state else None
                     R_ref = m["R"] if (m and m.get("R") is not None) else prev_R
                     R_pca, perm_applied, perm_err_deg = align_rotation_to_reference(R_est_raw, R_ref)
-                    if marker_on_object and m is not None and USE_MARKER_POSE_WHEN_ON_OBJECT:
+
+                    use_marker_for_display = marker_on_object and m is not None and USE_MARKER_POSE_WHEN_ON_OBJECT
+                    if use_marker_for_display:
                         R_est = m["R"].copy()
                         center_est = m["tvec"].reshape(3).astype(np.float64)
+                        length_m, width_m, height_m, extents_alg, obb_center_alg = estimate_obb_dimensions(pts, center_pca, R_pca)
+                        extents, obb_center = extents_alg, obb_center_alg
+                        R_logged, center_logged = R_pca.copy(), obb_center_alg.copy()
                     else:
                         R_est = R_pca.copy()
+                        center_est = center_pca.copy()
                         if pose_key in pose_state:
                             center_est = smooth_vec(pose_state[pose_key]["center"], center_est, alpha=pos_alpha)
                             R_est = smooth_rotation(pose_state[pose_key]["R"], R_est, alpha=rot_alpha)
+                        length_m, width_m, height_m, extents, obb_center = estimate_obb_dimensions(pts, center_est, R_est)
+                        R_logged, center_logged = R_est.copy(), obb_center.copy()
                     pose_state[pose_key] = {"center": center_est.copy(), "R": R_est.copy()}
 
                     roll_est, pitch_est, yaw_est = rotmat_to_rpy_zyx(R_est)
-                    length_m, width_m, height_m, extents, obb_center = estimate_obb_dimensions(pts, center_est, R_est)
 
                     lam1, lam2, lam3 = [float(x) for x in eigvals]
                     linearity = (lam1 - lam2) / lam1 if lam1 > 1e-12 else np.nan
@@ -976,10 +984,10 @@ def main():
                 if m is not None:
                     tvec = m["tvec"].reshape(3)
                     R_gt = m["R"]
-                    pos_err, err_normal, err_tangent = translation_surface_err(tvec, obb_center, R_est, extents)
-                    ang_err = rotation_error_deg(R_gt, R_est) if marker_on_object else float("nan")
-                    algorithm_ang_err = rotation_error_deg(R_gt, R_pca) if marker_on_object else float("nan")
-                    normal_err = surface_normal_error_deg(R_gt, R_est) if marker_on_object else float("nan")
+                    pos_err, err_normal, err_tangent = translation_surface_err(tvec, obb_center, R_logged, extents)
+                    ang_err = rotation_error_deg(R_gt, R_logged) if marker_on_object else float("nan")
+                    algorithm_ang_err = ang_err
+                    normal_err = surface_normal_error_deg(R_gt, R_logged) if marker_on_object else float("nan")
                     gt_roll, gt_pitch, gt_yaw = rotmat_to_rpy_zyx(R_gt)
                     gt_row = {
                         "gt_marker_id": int(m["id"]),
@@ -1048,6 +1056,7 @@ def main():
                 cv2.putText(vis, rpy_txt, (x1, y_txt), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
                 cv2.putText(vis, rpy_txt, (x1, y_txt), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2, cv2.LINE_AA)
 
+                roll_logged, pitch_logged, yaw_logged = rotmat_to_rpy_zyx(R_logged)
                 row = {
                     "frame": frame_id, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "object_index": int(obj_index), "object_id": int(obj_id) if obj_id is not None else "",
@@ -1055,11 +1064,11 @@ def main():
                     "bbox_x1": int(x1), "bbox_y1": int(y1), "bbox_x2": int(x2), "bbox_y2": int(y2),
                     "num_points": int(pts.shape[0]), "valid_depth_ratio": valid_depth_ratio,
                     "z_median_m": z_med, "z_std_m": z_std,
-                    "cx": float(center_est[0]), "cy": float(center_est[1]), "cz": float(center_est[2]),
-                    "roll_deg": math.degrees(roll_est), "pitch_deg": math.degrees(pitch_est), "yaw_deg": math.degrees(yaw_est),
-                    "r00": float(R_est[0, 0]), "r01": float(R_est[0, 1]), "r02": float(R_est[0, 2]),
-                    "r10": float(R_est[1, 0]), "r11": float(R_est[1, 1]), "r12": float(R_est[1, 2]),
-                    "r20": float(R_est[2, 0]), "r21": float(R_est[2, 1]), "r22": float(R_est[2, 2]),
+                    "cx": float(center_logged[0]), "cy": float(center_logged[1]), "cz": float(center_logged[2]),
+                    "roll_deg": math.degrees(roll_logged), "pitch_deg": math.degrees(pitch_logged), "yaw_deg": math.degrees(yaw_logged),
+                    "r00": float(R_logged[0, 0]), "r01": float(R_logged[0, 1]), "r02": float(R_logged[0, 2]),
+                    "r10": float(R_logged[1, 0]), "r11": float(R_logged[1, 1]), "r12": float(R_logged[1, 2]),
+                    "r20": float(R_logged[2, 0]), "r21": float(R_logged[2, 1]), "r22": float(R_logged[2, 2]),
                     "length_m": length_m, "width_m": width_m, "height_m": height_m,
                     "extent_axis0_m": extents[0], "extent_axis1_m": extents[1], "extent_axis2_m": extents[2],
                     "eigval1": lam1, "eigval2": lam2, "eigval3": lam3,
@@ -1071,7 +1080,7 @@ def main():
 
                 pc_objs.append({"pts": pts, "center": obb_center.copy(), "R": R_est.copy(), "extents": extents, "label": f"{class_name} {score:.2f}"})
                 if saved_pts is None:
-                    saved_pts, saved_center, saved_R = pts.copy(), center_est.copy(), R_est.copy()
+                    saved_pts, saved_center, saved_R = pts.copy(), center_logged.copy(), R_logged.copy()
 
                 if class_id == cube_class_id:
                     target_pos = isaac_target_positions.get(str(cube_size_label), isaac_target_positions["default"])
