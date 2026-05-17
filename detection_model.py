@@ -9,7 +9,8 @@ class ObjectDetector:
     """
     Object detection using YOLOv11 from Ultralytics
     """
-    def __init__(self, model_size='nano', conf_thres=0.25, iou_thres=0.45, classes=None, device=None):
+    def __init__(self, model_size='nano', conf_thres=0.25, iou_thres=0.45, classes=None, device=None,
+                 weights_path=None):
         """
         Initialize the object detector
         
@@ -19,6 +20,8 @@ class ObjectDetector:
             iou_thres (float): IoU threshold for NMS
             classes (list): List of classes to detect (None for all classes)
             device (str): Device to run inference on ('cuda', 'cpu', 'mps')
+            weights_path (str): Optional path to custom .pt weights (e.g. 'best.pt').
+                If provided, overrides model_size.
         """
         # Determine device
         if device is None:
@@ -47,14 +50,21 @@ class ObjectDetector:
             'extra': 'yolo11x.pt'
         }
         
-        model_name = model_map.get(model_size.lower(), model_map['nano'])
-        
-        try:
-            self.model = YOLO(model_name)
-            print(f"Loaded YOLOv11 {model_size} model on {self.device}")
-        except Exception as e:
-            print(f"Error loading {model_name}: {e}, falling back to yolo11n.pt")
-            self.model = YOLO('yolo11n.pt')
+        if weights_path:
+            try:
+                self.model = YOLO(weights_path)
+                print(f"Loaded custom YOLO weights from {weights_path} on {self.device}")
+            except Exception as e:
+                print(f"Error loading {weights_path}: {e}, falling back to yolo11n.pt")
+                self.model = YOLO('yolo11n.pt')
+        else:
+            model_name = model_map.get(model_size.lower(), model_map['nano'])
+            try:
+                self.model = YOLO(model_name)
+                print(f"Loaded YOLOv11 {model_size} model on {self.device}")
+            except Exception as e:
+                print(f"Error loading {model_name}: {e}, falling back to yolo11n.pt")
+                self.model = YOLO('yolo11n.pt')
         
         # Set model parameters
         self.model.overrides['conf'] = conf_thres
@@ -238,4 +248,85 @@ class ObjectDetector:
         Returns:
             list: List of class names
         """
-        return self.model.names 
+        return self.model.names
+
+
+class MultiObjectDetector:
+    """
+    Runs multiple YOLO models on the same frame and merges their detections
+    into a single unified list. Remaps class_id and track_id so that outputs
+    from different models never collide.
+
+    Example:
+        det = MultiObjectDetector(
+            weights_list=["best.pt", "yolo11n.pt"],
+            conf_thres=0.25, iou_thres=0.45, device="cuda",
+        )
+        annotated, dets = det.detect(frame, track=True)
+        names = det.get_class_names()  # unified {global_id: name}
+    """
+
+    # Each detector's class_id / track_id is offset by model_index * OFFSET.
+    # 10_000 is more than enough: COCO has 80 classes, custom rarely >hundreds.
+    _ID_OFFSET = 10_000
+
+    def __init__(self, weights_list, conf_thres=0.25, iou_thres=0.45, classes=None, device=None,
+                 exclude_classes_per_model=None):
+        """
+        Args:
+            weights_list (list[str]): paths to .pt weights, in priority order.
+            exclude_classes_per_model (dict[int, set[int]]):
+                {model_index: {local_class_ids_to_drop}}. Useful to prevent a
+                generic model from re-detecting what a specialized model already
+                covers (e.g. drop any class the custom model handles).
+        """
+        self.detectors = []
+        self.merged_names = {}
+        self.exclude_classes_per_model = exclude_classes_per_model or {}
+
+        for idx, w in enumerate(weights_list):
+            det = ObjectDetector(
+                weights_path=w, conf_thres=conf_thres, iou_thres=iou_thres,
+                classes=classes, device=device,
+            )
+            self.detectors.append(det)
+
+            raw_names = det.get_class_names()
+            local = dict(raw_names) if isinstance(raw_names, dict) \
+                else {i: n for i, n in enumerate(raw_names)}
+            excl = self.exclude_classes_per_model.get(idx, set())
+            for k, v in local.items():
+                if int(k) in excl:
+                    continue
+                self.merged_names[idx * self._ID_OFFSET + int(k)] = str(v)
+
+    def _remap(self, model_idx, local_class_id, local_obj_id):
+        new_cls = model_idx * self._ID_OFFSET + int(local_class_id)
+        new_obj = None if local_obj_id is None else model_idx * self._ID_OFFSET + int(local_obj_id)
+        return new_cls, new_obj
+
+    def unmap_class_id(self, global_class_id):
+        """Return (model_idx, local_class_id) for a global class id."""
+        g = int(global_class_id)
+        return g // self._ID_OFFSET, g % self._ID_OFFSET
+
+    def detect(self, image, track=True):
+        annotated = image.copy()
+        merged = []
+        for idx, det in enumerate(self.detectors):
+            excl = self.exclude_classes_per_model.get(idx, set())
+            try:
+                _, dets = det.detect(image.copy(), track=track)
+            except Exception as e:
+                print(f"[MultiObjectDetector] model {idx} detect error: {e}")
+                continue
+            for bbox, score, class_id, obj_id in dets:
+                if int(class_id) in excl:
+                    continue
+                new_cls, new_obj = self._remap(idx, class_id, obj_id)
+                merged.append([bbox, float(score), new_cls, new_obj])
+        return annotated, merged
+
+    def get_class_names(self):
+        """Unified {global_id: name} across all models."""
+        return dict(self.merged_names)
