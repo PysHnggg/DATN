@@ -13,7 +13,7 @@ import os
 import csv
 import argparse
 import time
-import math3
+import math
 import itertools
 import cv2
 import json
@@ -1475,7 +1475,8 @@ def main():
     _isaac_host = os.environ.get("ISAAC_UDP_HOST", "127.0.0.1").strip() or "127.0.0.1"
     isaac_sock = create_isaac_udp_client(host=_isaac_host, port=6000)
     dashboard.configure_isaac_commands(host=_isaac_host, port=6001)
-    print(f"[INFO] Isaac UDP pose → {_isaac_host}:6000  commands → {_isaac_host}:6001 (set ISAAC_UDP_HOST if Isaac runs on another PC)")
+    dashboard.configure_cube_signal(host=_isaac_host, port=6000)
+    print(f"[INFO] Isaac manual trigger → {_isaac_host}:6000  commands → {_isaac_host}:6001 (set ISAAC_UDP_HOST if Isaac runs on another PC)")
 
     pose_state = {}
     box_state = {}
@@ -1998,14 +1999,19 @@ def main():
                     saved_pts, saved_center, saved_R = pts.copy(), center_logged.copy(), R_logged.copy()
 
                 if is_cube:
-                    send_cube_to_isaac(isaac_sock, frame_id, class_name, center_est, R_est,
-                                       length_m, width_m, height_m,
-                                       target_position=isaac_target_position)
-                    dashboard.push_udp_log(
-                        f"{class_name} | pos=({center_est[0]:.2f},{center_est[1]:.2f},{center_est[2]:.2f})m | "
-                        f"size=({length_m*100:.1f}x{width_m*100:.1f}x{height_m*100:.1f})cm"
-                    )
-                    dashboard.set_isaac_connected(True)
+                    # Manual-trigger flow:
+                    #   YOLO detects cube -> dashboard shows detection -> user presses
+                    #   "Send Cube Signal" -> dashboard sends UDP trigger to Isaac.
+                    #
+                    # Do NOT auto-send pose/size/rotation to Isaac here.
+                    # Isaac will spawn/reset the demo cube using its own fixed sample values.
+                    dashboard.set_status("udp", True, "cube detected - press Send Cube Signal")
+                    if frame_id % 30 == 0:
+                        dashboard.push_log(
+                            "detector",
+                            f"Cube detected ({class_name}, conf={score:.2f}). Press 'Send Cube Signal' on dashboard.",
+                            level="ok",
+                        )
 
             if profile_stages:
                 ms_2d = (_t_2d1 - _t_2d0) * 1000.0

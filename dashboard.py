@@ -73,6 +73,7 @@ _state = {
         "latency_ms":  0.0,
         "dropped":     0,
         "udp_packets": 0,
+        "cube_signals": 0,
     },
 }
 
@@ -82,6 +83,11 @@ _controls: dict[str, Callable[[Optional[dict]], dict]] = {}
 _isaac_cmd_host = "127.0.0.1"
 _isaac_cmd_port = 6001
 _isaac_cmd_sock: Optional[socket.socket] = None
+
+# UDP trigger for cube spawn / pick-place request. This is intentionally
+# separate from Isaac command UDP (:6001). The cube trigger goes to :6000.
+_cube_signal_port = 6000
+_cube_signal_sock: Optional[socket.socket] = None
 
 
 # ── Public API (called from run*.py) ──────────────────────────────────────
@@ -102,6 +108,28 @@ def configure_isaac_commands(host: str = "127.0.0.1", port: int = 6001):
             pass
         _isaac_cmd_sock = None
     push_log("isaac", f"Isaac command UDP set to {_isaac_cmd_host}:{_isaac_cmd_port}", level="info")
+
+
+
+def configure_cube_signal(host: str = "127.0.0.1", port: int = 6000):
+    """
+    Set UDP destination for the manual "Send Cube Signal" button.
+
+    This button does NOT send YOLO pose. It only sends a trigger packet:
+        {"type": "cube_signal", "command": "spawn_cube"}
+    Isaac Sim listens on this port, spawns/resets the demo cube, then waits
+    for the dashboard Play button before executing pick-and-place.
+    """
+    global _isaac_cmd_host, _cube_signal_port, _cube_signal_sock
+    _isaac_cmd_host = str(host)
+    _cube_signal_port = int(port)
+    if _cube_signal_sock is not None:
+        try:
+            _cube_signal_sock.close()
+        except Exception:
+            pass
+        _cube_signal_sock = None
+    push_log("udp", f"Cube signal UDP set to {_isaac_cmd_host}:{_cube_signal_port}", level="info")
 
 
 def push_frame(key: str, frame_bgr: np.ndarray):
@@ -210,7 +238,59 @@ def _send_isaac_command(cmd: str) -> bool:
         return False
 
 
+def _has_cube_detection() -> bool:
+    """Return True when the current dashboard detection table contains a cube."""
+    with _lock:
+        dets = list(_state.get("detections", []))
+    for d in dets:
+        cls = str(d.get("class", "")).lower()
+        lbl = str(d.get("label", "")).lower()
+        if "cube" in cls or "cube" in lbl:
+            return True
+    return False
+
+
+def _send_cube_signal() -> bool:
+    """Send manual cube trigger to Isaac Sim on UDP :6000."""
+    global _cube_signal_sock
+    payload = {
+        "type": "cube_signal",
+        "command": "spawn_cube",
+        "source": "dashboard_button",
+        "t": time.time(),
+    }
+    data = json.dumps(payload).encode("utf-8")
+    try:
+        if _cube_signal_sock is None:
+            _cube_signal_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _cube_signal_sock.sendto(data, (_isaac_cmd_host, _cube_signal_port))
+        push_log("udp", f"Cube signal sent → {_isaac_cmd_host}:{_cube_signal_port}", level="ok")
+        with _lock:
+            _state["metrics"]["cube_signals"] += 1
+            _state["status"]["udp"] = {
+                "ok": True,
+                "detail": f"cube signal #{_state['metrics']['cube_signals']}",
+            }
+        return True
+    except OSError as e:
+        push_log("udp", f"Cube signal send failed: {e}", level="error")
+        return False
+
+
 # ── Built-in control handlers (used if no custom one is registered) ───────
+
+def _ctrl_send_cube_signal(_payload):
+    """
+    Dashboard button: only send the cube trigger after YOLO detects a cube.
+    This keeps the required flow:
+        detect cube -> user presses Send Cube Signal -> Isaac spawns cube
+    """
+    if not _has_cube_detection():
+        push_log("udp", "Send Cube Signal blocked: no cube detection in current frame.", level="warn")
+        return {"sent": False, "reason": "no_cube_detection"}
+    ok = _send_cube_signal()
+    return {"sent": ok, "port": _cube_signal_port}
+
 
 def _ctrl_pause(_payload):
     with _lock:
@@ -290,6 +370,7 @@ _DEFAULT_CONTROLS = {
     "clear-logs":     _ctrl_clear_logs,
     "reset-counters": _ctrl_reset_counters,
     "test-udp":       _ctrl_test_udp,
+    "send-cube-signal": _ctrl_send_cube_signal,
     "ping-isaac":     _ctrl_ping_isaac,
     "isaac-play":     _ctrl_isaac_play,
     "isaac-pause":    _ctrl_isaac_pause,
@@ -644,6 +725,7 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="group">
     <span class="glabel">Bridge</span>
+    <button class="btn primary" data-action="send-cube-signal">&#129482; Send Cube Signal</button>
     <button class="btn"         data-action="test-udp">&#128231; Test UDP</button>
     <button class="btn"         data-action="ping-isaac">&#128225; Ping Isaac</button>
   </div>
